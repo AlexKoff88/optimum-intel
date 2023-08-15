@@ -12,11 +12,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+from functools import partial
 import inspect
 import logging
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple, Union
+from torchvision import transforms
+from tqdm import tqdm
 
 import nncf
 import openvino
@@ -43,6 +46,7 @@ from ..utils.modeling_utils import patch_decoder_attention_mask
 from .configuration import OVConfig
 from .modeling_base import OVBaseModel
 from .modeling_decoder import OVBaseDecoderModel
+from .modeling_diffusion import OVStableDiffusionPipelineBase
 from .utils import (
     MAX_ONNX_OPSET,
     MIN_ONNX_QDQ_OPSET,
@@ -184,6 +188,15 @@ class OVQuantizer(OptimumQuantizer):
 
         if isinstance(self.model, OVBaseDecoderModel) and self.model.use_cache:
             self._quantize_ovcausallm(
+                calibration_dataset,
+                save_directory,
+                batch_size,
+                data_collator,
+                remove_unused_columns,
+                **kwargs,
+            )
+        elif issubclass(self.model.__class__, OVStableDiffusionPipelineBase):
+            self._quantize_stable_diffusion(
                 calibration_dataset,
                 save_directory,
                 batch_size,
@@ -408,6 +421,137 @@ class OVQuantizer(OptimumQuantizer):
                     pass
 
         quantization_config.save_pretrained(save_directory)
+        
+    def _quantize_stable_diffusion(
+        self,
+        calibration_dataset: Dataset,
+        save_directory: Union[str, Path],
+        batch_size: int = 1,
+        data_collator: Optional[DataCollator] = None,
+        remove_unused_columns: bool = True,
+        **kwargs,
+    ):
+        pipeline = self.model
+        tokenizer = pipeline.tokenizer
+        save_directory = Path(save_directory)
+        save_directory.mkdir(parents=True, exist_ok=True)
+        
+        if kwargs.get("image_column") is not None:
+            image_column = kwargs.get("image_column")
+            del kwargs["image_column"]
+        else:
+            raise ValueError("image_column parameters of the dataset should be specified")
+        
+        if kwargs.get("caption_column") is not None:
+            caption_column = kwargs.get("caption_column")
+            del kwargs["caption_column"]
+        else:
+            raise ValueError("caption_column parameters of the dataset should be specified")        
+        
+        def tokenize_captions(examples, is_train=True):
+            captions = []
+            caption = examples[caption_column]
+            if isinstance(caption, str):
+                captions.append(caption)
+            elif isinstance(caption, (list, np.ndarray)):
+                # take a random caption if there are multiple
+                captions.append(caption[0])
+            else:
+                raise ValueError(f"Caption column `{caption_column}` should contain either strings or lists of strings.")
+            inputs = tokenizer(captions[0], max_length=tokenizer.model_max_length, padding="max_length", truncation=True) #do_not_pad
+            input_ids = inputs.input_ids
+            return input_ids
+
+        image_transforms = transforms.Compose(
+            [
+                transforms.Resize((pipeline.width, pipeline.height), interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(pipeline.width),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
+        )
+        
+        def preprocess_inputs(examples, image_transforms, tokenize_captions):
+            image = examples[image_column]
+            examples["pixel_values"] = image_transforms(image.convert("RGB"))
+            examples["input_ids"] = tokenize_captions(examples)
+            return examples
+
+
+        preprocess_fn = partial(
+            preprocess_inputs, image_transforms=image_transforms, tokenize_captions=tokenize_captions
+        )
+
+        def collate_fn(examples):
+            examples = [preprocess_fn(example) for example in examples]
+            pixel_values = torch.stack([example["pixel_values"] for example in examples])
+            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+            input_ids = [example["input_ids"] for example in examples]
+            padded_tokens = tokenizer.pad({"input_ids": input_ids}, padding=True, return_tensors="pt")
+            return {
+                "pixel_values": pixel_values,
+                "input_ids": padded_tokens.input_ids,
+                "attention_mask": padded_tokens.attention_mask,
+        }
+
+        data_collator = data_collator if data_collator is not None else default_data_collator
+        self.input_names = calibration_dataset.column_names
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        sampler = RandomSampler(calibration_dataset, generator=generator)
+        calibration_dataloader = DataLoader(
+            calibration_dataset, batch_size=batch_size, sampler=sampler, collate_fn=collate_fn, drop_last=False
+        )
+        
+        weight_dtype = torch.float32
+        unet = pipeline.unet
+        text_encoder = pipeline.text_encoder
+        vae = pipeline.vae_encoder
+        noise_scheduler = pipeline.scheduler
+
+        nncf_init_data = []
+        subset_size = kwargs.get("subset_size", 300)
+        
+        logger.info(f"Fetching {subset_size} for the initialization...")
+        for i, batch in tqdm(enumerate(calibration_dataloader)):
+            if i > subset_size:
+                break
+            with torch.no_grad():
+                # Convert images to latent space
+                encoded = vae(batch["pixel_values"])
+                print(len(encoded), encoded[0].shape)
+                latents = torch.tensor(encoded[0]) #vae.encode(batch["pixel_values"].to(weight_dtype)).latent_dist.sample()
+                latents = latents * 0.18215
+
+                # Sample noise that we'll add to the latents
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bsz,))
+                timesteps = timesteps.long()
+
+                # Add noise to the latents according to the noise magnitude at each timestep
+                # (this is the forward diffusion process)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                encoder_hidden_states = text_encoder(batch["input_ids"])[0]
+                nncf_init_data.append(
+                    (
+                        noisy_latents.numpy(),
+                        timesteps.numpy(),
+                        encoder_hidden_states
+                    )
+                )
+
+        quantization_dataset = nncf.Dataset(nncf_init_data, lambda x: x)
+        quantized_unet = nncf.quantize(
+            unet.model,
+            quantization_dataset,
+            model_type=nncf.ModelType.TRANSFORMER if not kwargs.get("model_type") else kwargs.get("model_type"),
+            fast_bias_correction=kwargs.get("fast_bias_correction", True),
+            **kwargs,
+        )
+        self.model.unet.model = quantized_unet
+        self.model.save_pretrained(save_directory)
 
     @staticmethod
     def _save_pretrained(model: openvino.runtime.Model, output_path: str):
