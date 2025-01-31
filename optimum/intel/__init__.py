@@ -84,6 +84,9 @@ except OptionalDependencyNotAvailable:
             "OVQuantizationConfig",
             "OVWeightQuantizationConfig",
             "OVDynamicQuantizationConfig",
+            "OVWeightQuantizationOptions",
+            "OVGenericQuantizationConfig",
+            "OVQuantizationOptions",
         ]
     )
 else:
@@ -94,6 +97,9 @@ else:
             "OVQuantizationConfig",
             "OVWeightQuantizationConfig",
             "OVDynamicQuantizationConfig",
+            "OVWeightQuantizationOptions",
+            "OVGenericQuantizationConfig",
+            "OVQuantizationOptions",
         ]
     )
 
@@ -190,6 +196,9 @@ else:
             "OVModelOpenCLIPVisual",
             "OVModelOpenCLIPText",
             "OVModelOpenCLIPForZeroShotImageClassification",
+            "OVWeightQuantizationOptions",
+            "OVGenericQuantizationConfig",
+            "OVQuantizationOptions",
         ]
     )
 
@@ -274,6 +283,9 @@ if TYPE_CHECKING:
             OVQuantizer,
             OVTrainingArguments,
             OVWeightQuantizationConfig,
+            OVWeightQuantizationOptions,
+            OVGenericQuantizationConfig,
+            OVQuantizationOptions,
         )
     else:
         from .openvino import (
@@ -282,6 +294,9 @@ if TYPE_CHECKING:
             OVQuantizer,
             OVTrainingArguments,
             OVWeightQuantizationConfig,
+            OVWeightQuantizationOptions,
+            OVGenericQuantizationConfig,
+            OVQuantizationOptions,
         )
 
     try:

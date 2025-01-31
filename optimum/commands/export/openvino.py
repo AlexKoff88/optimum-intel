@@ -309,10 +309,10 @@ class OVExportCommand(BaseOptimumCLICommand):
         from ...exporters.openvino.utils import save_preprocessors
         from ...intel.openvino.configuration import (
             _DEFAULT_4BIT_CONFIG,
-            OVCompressWeightsOptions,
+            OVWeightQuantizationOptions,
             OVConfig,
-            OVGeneralQuantizationConfig,
-            OVQuantizeOptions,
+            OVGenericQuantizationConfig,
+            OVQuantizationOptions,
             get_default_int4_config,
         )
 
@@ -363,13 +363,13 @@ class OVExportCommand(BaseOptimumCLICommand):
             if self.args.quant_mode == "nf4_f8e4m3":
                 wc_config = prepare_for_wc_config(self.args, _DEFAULT_4BIT_CONFIG)
                 wc_config["weight_format"] = "nf4"
-                cw_options = OVCompressWeightsOptions.init_with_format(**wc_config)
+                cw_options = OVWeightQuantizationOptions(**wc_config)
 
                 q_config = prepare_for_q_config(self.args)
                 q_config["activation_format"] = "f8e4m3"
-                q_options = OVQuantizeOptions.init_with_format(**q_config)
+                q_options = OVQuantizationOptions.init_with_format(**q_config)
 
-                quantization_config = OVGeneralQuantizationConfig.init_with_format(
+                quantization_config = OVGenericQuantizationConfig.init_with_format(
                     bits=8,
                     sym=self.args.sym,
                     ignored_scope=None,
@@ -378,8 +378,8 @@ class OVExportCommand(BaseOptimumCLICommand):
                     trust_remote_code=self.args.trust_remote_code,
                     weight_format=self.args.weight_format,
                 )
-                quantization_config.compress_weights_options = cw_options
-                quantization_config.quantize_options = q_options
+                quantization_config.weight_quantization_options = cw_options
+                quantization_config.activation_quantization_options = q_options
             else:
                 quantization_config = prepare_for_q_config(self.args)
             ov_config = OVConfig(quantization_config=quantization_config)

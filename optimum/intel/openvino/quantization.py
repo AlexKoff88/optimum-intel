@@ -60,7 +60,7 @@ from ..utils.import_utils import (
 from ..utils.modeling_utils import get_model_device
 from .configuration import (
     OVConfig,
-    OVGeneralQuantizationConfig,
+    OVGenericQuantizationConfig,
     OVQuantizationConfig,
     OVQuantizationConfigBase,
     OVQuantizationMethod,
@@ -1201,7 +1201,7 @@ def _hybrid_quantization(
 
 def _general_quantization(
     model: openvino.Model,
-    quantization_config: OVGeneralQuantizationConfig,
+    quantization_config: OVGenericQuantizationConfig,
     calibration_dataset: nncf.Dataset,
     **kwargs,
 ) -> openvino.Model:
@@ -1213,7 +1213,7 @@ def _general_quantization(
     Args:
         model (`openvino.runtime.Model`):
             The OpenVINO Runtime model for applying quantization.
-        quantization_config (`OVGeneralQuantizationConfig`):
+        quantization_config (`OVGenericQuantizationConfig`):
             The configuration containing the parameters related to quantization.
         calibration_dataset (`nncf.Dataset`):
             The dataset used for quantization.
@@ -1224,10 +1224,10 @@ def _general_quantization(
 
     ignored_scope = quantization_config.get_ignored_scope_instance()
 
-    if quantization_config.compress_weights_options:
+    if quantization_config.weight_quantization_options:
         ops_with_weights = _collect_ops_with_weights(model)
         wc_kwargs = copy.deepcopy(kwargs)
-        wc_kwargs.update(quantization_config.compress_weights_options.to_nncf_dict())
+        wc_kwargs.update(quantization_config.weight_quantization_options.to_nncf_dict())
         quantized_model = nncf.compress_weights(
             model,
             ignored_scope=ignored_scope,
@@ -1237,9 +1237,9 @@ def _general_quantization(
         )
         ignored_scope.names += ops_with_weights
 
-    if quantization_config.quantize_options:
+    if quantization_config.activation_quantization_options:
         q_kwargs = copy.deepcopy(kwargs)
-        q_kwargs.update(quantization_config.quantize_options.to_nncf_dict())
+        q_kwargs.update(quantization_config.activation_quantization_options.to_nncf_dict())
         quantized_model = nncf.quantize(
             model,
             calibration_dataset,
